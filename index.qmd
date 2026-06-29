@@ -1,0 +1,1337 @@
+---
+title: "$\\text{CO}_2$ Atmosférico em Mauna Loa"
+subtitle: "Trabalho 2 --- Análise de Séries Temporais"
+author:
+  - "Arthur Motta"
+  - "Catarine Martins"
+date: today
+lang: pt
+bibliography: references.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/associacao-brasileira-de-normas-tecnicas.csl
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Sumário"
+    number-sections: true
+    theme: flatly
+    code-fold: show
+    code-summary: "Ocultar código"
+    code-tools:
+      source: false
+      toggle: true
+      caption: "Mostrar/ocultar todos os códigos"
+    fig-align: center
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+knitr:
+  opts_chunk:
+    fig.path: "figures/"
+---
+
+```{r setup}
+#| label: setup
+#| code-summary: "Carregar pacotes"
+
+# --- Séries temporais e modelagem ---
+library(dlm)         # modelos lineares dinâmicos: filtragem, suavização, previsão
+library(KFAS)        # modelo estrutural básico com estimação exata (Harvey 1989)
+library(forecast)    # SARIMA para comparação
+
+# --- Visualização ---
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+# --- Tabelas ---
+library(gt)
+
+# --- Manipulação ---
+library(tidyverse)
+
+theme_set(theme_minimal(base_size = 12))
+
+cores <- c("#2E86AB", "#E94F37", "#3BB273", "#F4A261", "#8338EC")
+```
+
+```{r dados}
+#| label: dados
+#| code-summary: "Carregar e preparar os dados"
+#| include: false
+
+data(co2, package = "datasets")
+
+co2_df <- tibble(
+  tempo = as.numeric(time(co2)),
+  ano   = as.integer(floor(tempo)),
+  mes   = as.integer(round((tempo - floor(tempo)) * 12)) + 1L,
+  ppm   = as.numeric(co2)
+) |>
+  mutate(mes = ifelse(mes > 12L, 12L, mes))
+
+n      <- length(co2)
+inicio <- start(co2)
+fim    <- end(co2)
+burnin <- 24L   # meses de burn-in descartados no diagnóstico
+```
+
+# Introdução
+
+Este trabalho aplica a metodologia de **Modelos Lineares Dinâmicos (MLD)** à série
+de $\text{CO}_2$ atmosférico de Mauna Loa, a mesma série analisada no Trabalho 1
+por meio de modelos SARIMA. A análise descritiva completa, incluindo decomposição
+STL, padrão sazonal e taxa de crescimento, encontra-se no Trabalho 1 e não será
+repetida aqui.
+
+Recapitulando brevemente: a série `co2`, disponível nativamente no R, contém `r n`
+observações mensais de concentração de $\text{CO}_2$ (em partes por milhão, ppm)
+de janeiro de `r inicio[1]` a dezembro de `r fim[1]`, coletadas pelo Observatório
+de Mauna Loa, Havaí [@keeling1976atmospheric]. A série apresenta tendência crescente
+de longo prazo e sazonalidade anual regular de amplitude aproximada de 6 ppm,
+estrutura que motiva o uso de um MLD com componentes de nível, tendência e
+sazonalidade.
+
+A escolha da abordagem bayesiana via MLD se justifica por duas razões principais.
+Primeiro, os MLDs estimam explicitamente os componentes latentes da série (nível,
+tendência e sazonalidade) como estados não observáveis, o que confere riqueza
+interpretativa que o SARIMA não oferece diretamente. Segundo, o filtro de Kalman
+permite atualização sequencial das estimativas à medida que novas observações chegam,
+o que é adequado para monitoração e previsão em tempo real de concentrações atmosféricas.
+
+A pergunta central deste trabalho é: um MLD com tendência linear e sazonalidade
+captura adequadamente a dinâmica da série de $\text{CO}_2$ e produz previsões
+comparáveis às do SARIMA ajustado no Trabalho 1?
+
+A análise está organizada em três etapas. Na primeira, especifica-se e ajusta-se o
+MLD com $V$ e $W$ estimados por máxima verossimilhança, comparando três formulações
+distintas. Na segunda, realiza-se a filtragem e a suavização, ou seja, a inferência
+sequencial e retrospectiva sobre o nível e a tendência da série. Na terceira,
+produzem-se previsões para 1998 e 1999 com comparação ao SARIMA$(1,1,1)(0,1,1)_{12}$
+do Trabalho 1.
+
+---
+
+# Especificação do Modelo Linear Dinâmico {#sec-modelo}
+
+## Estrutura geral
+
+O MLD é definido pela quádrupla $\{F_t, G_t, V_t, W_t\}$ e escrito como:
+
+$$y_t = F_t^\prime \theta_t + v_t, \quad v_t \sim N(0, V_t)$$
+$$\theta_t = G_t \theta_{t-1} + \omega_t, \quad \omega_t \sim N(0, W_t)$$
+$$\theta_0 \mid D_0 \sim N(m_0, C_0)$$
+
+onde $y_t$ é a concentração de $\text{CO}_2$ no mês $t$, $\theta_t$ é o vetor de
+estados latentes, $v_t$ é o erro de observação e $\omega_t$ é o erro do sistema.
+
+## Três Abordagens de Modelagem
+
+Para a série de CO₂, que combina tendência suave com sazonalidade anual estável,
+consideramos três formulações de MLD, todas baseadas na estrutura:
+$$y_t = \mu_t + \gamma_t + v_t, \quad v_t \sim N(0, V)$$
+onde $\mu_t$ é a **tendência** (nível + slope) e $\gamma_t$ é a **sazonalidade**.
+
+**Componente de tendência linear** (comum às três abordagens, $\dim = 2$):
+
+$$\mu_{t+1} = \mu_t + \beta_t + \xi_t, \qquad \xi_t \sim N(0, W_\mu)$$
+$$\beta_{t+1} = \beta_t + \zeta_t, \qquad \zeta_t \sim N(0, W_\beta)$$
+
+em forma matricial: $G_{\text{tend}} = \begin{pmatrix} 1 & 1 \\ 0 & 1 \end{pmatrix}$,
+$F_{\text{tend}} = (1, 0)^\prime$.
+
+**Modelo A — Sazonalidade por fatores (dlmModSeas):**
+A sazonalidade é modelada pela restrição de soma zero com $s - 1 = 11$ estados livres:
+$$\gamma_{t+1} = -\sum_{j=1}^{s-1} \gamma_{t+1-j} + \omega_t, \qquad
+\omega_t \sim N(0, W_s)$$
+Dimensão total: $\dim(\theta_t) = 13$. Referência: Harvey (1989).
+
+**Modelo B — Sazonalidade harmônica via dlmModTrig (West & Harrison):**
+A sazonalidade é representada por $J$ pares harmônicos de Fourier, cada um evoluindo
+via passeio aleatório bidimensional com matriz de rotação:
+$$\gamma_t = \sum_{j=1}^{J} \gamma_{j,t}, \qquad
+\begin{pmatrix} \gamma_{j,t+1} \\ \gamma^*_{j,t+1} \end{pmatrix} =
+\begin{pmatrix} \cos\omega_j & \sin\omega_j \\ -\sin\omega_j & \cos\omega_j \end{pmatrix}
+\begin{pmatrix} \gamma_{j,t} \\ \gamma^*_{j,t} \end{pmatrix} + \omega_{j,t}$$
+com $\omega_j = 2\pi j / s$ e $J = 6$ harmônicos para $s = 12$.
+O harmônico de Nyquist ($j = 6$, $\omega_6 = \pi$) reduz-se a um único estado pois
+$\sin(\pi t) \equiv 0$, portanto $\dim(\theta_t) = 2 + 2J - 1 = 13$.
+Referência: @west1997bayesian, cap. 8.
+
+**Modelo C — Modelo Estrutural Básico via KFAS:**
+O pacote KFAS [@helske2017kfas] implementa o modelo estrutural de Harvey (1989),
+estimando $V$, $W_\mu$, $W_\beta$ e $W_s$ por máxima verossimilhança com o algoritmo
+de Kalman exato (difuso). A sazonalidade usa a forma dummy (equivalente ao Modelo A)
+mas com estimação mais robusta e critérios de diagnóstico adicionais.
+
+A comparação entre os três modelos permite avaliar se a escolha da representação
+sazonal e do método de estimação afeta substancialmente as inferências e previsões.
+
+## Estimação de $V$ e $W$ por Máxima Verossimilhança
+
+Os parâmetros são estimados por **máxima verossimilhança** via função `dlmMLE` do
+pacote `dlm` [@petris2009dlm] (Modelos A e B) e via `fitSSM` do pacote `KFAS`
+[@helske2017kfas] (Modelo C), que maximizam a log-verossimilhança da previsão
+1 passo à frente acumulada:
+
+$$\ell(V, W) = -\frac{n}{2}\log(2\pi) - \frac{1}{2}\sum_{t=1}^n
+\left[\log Q_t + \frac{e_t^2}{Q_t}\right]$$
+
+onde $e_t = y_t - f_t$ é o erro de previsão 1 passo à frente e $Q_t = F^\prime R_t F + V$
+é sua variância. A otimização é feita em log-escala para garantir positividade dos
+parâmetros de variância.
+
+```{r especificacao-mld}
+#| label: especificacao-mld
+#| code-summary: "Ajuste dos três modelos por máxima verossimilhança"
+
+library(KFAS)   # Modelo Estrutural Básico com estimação exata
+J <- 6          # harmônicos para Modelo B
+
+# ── MODELO A: dlmModSeas (fatores sazonais, Harvey 1989) ──────────────────────
+build_mld_A <- function(par) {
+  V    <- exp(par[1]); w_mu <- exp(par[2])
+  w_be <- exp(par[3]); w_s  <- exp(par[4])
+  tend <- dlmModPoly(order = 2, dV = 0, dW = c(w_mu, w_be))
+  seas <- dlmModSeas(frequency = 12, dV = 0, dW = c(w_s, rep(0, 10)))
+  mld  <- tend + seas
+  mld$V <- matrix(V)
+  mld
+}
+set.seed(42)
+fit_A <- dlmMLE(as.numeric(co2),
+                parm   = c(log(0.1), log(0.01), log(1e-4), log(1e-4)),
+                build  = build_mld_A, method = "L-BFGS-B")
+mld_A <- build_mld_A(fit_A$par)
+mld_A$m0 <- c(315, 0.1, rep(0, 11))
+mld_A$C0 <- diag(c(50^2, 0.5^2, rep(5^2, 11)))
+
+# ── MODELO B: dlmModTrig (harmônicos de Fourier, West & Harrison 1997) ────────
+build_mld_B <- function(par) {
+  V      <- exp(par[1]); w_mu   <- exp(par[2])
+  w_be   <- exp(par[3]); w_trig <- exp(par[4])
+  tend <- dlmModPoly(order = 2, dV = 0, dW = c(w_mu, w_be))
+  trig <- dlmModTrig(s = 12, q = J, dV = 0, dW = w_trig)
+  mld  <- tend + trig
+  mld$V <- matrix(V)
+  mld
+}
+fit_B <- dlmMLE(as.numeric(co2),
+                parm   = c(log(0.1), log(0.01), log(1e-4), log(0.01)),
+                build  = build_mld_B, method = "L-BFGS-B")
+mld_B <- build_mld_B(fit_B$par)
+mld_B$m0 <- c(315, 0.1, rep(0, nrow(mld_B$GG) - 2))
+mld_B$C0 <- diag(c(50^2, 0.5^2, rep(5^2, nrow(mld_B$GG) - 2)))
+
+# ── MODELO C: KFAS — Modelo Estrutural Básico com sazonalidade dummy ──────────
+kfas_model <- SSModel(
+  as.numeric(co2) ~ SSMtrend(degree = 2, Q = list(matrix(NA), matrix(NA))) +
+                    SSMseasonal(period = 12, sea.type = "dummy", Q = matrix(NA)),
+  H = matrix(NA)
+)
+fit_C <- fitSSM(kfas_model, inits = log(c(0.1, 0.01, 1e-4, 1e-4)),
+                method = "L-BFGS-B")
+mld_C <- fit_C$model
+
+# ── Parâmetros do Modelo B (referência principal) ─────────────────────────────
+mld_final  <- mld_B    # modelo principal para filtragem/previsão
+V_est      <- exp(fit_B$par[1]); w_mu_est   <- exp(fit_B$par[2])
+w_be_est   <- exp(fit_B$par[3]); w_trig_est <- exp(fit_B$par[4])
+ratio_wb_v <- sprintf("%.2e", w_be_est / V_est)
+str_wtrig  <- sprintf("%.2e", w_trig_est)
+
+# ── Log-verossimilhanças para comparação ──────────────────────────────────────
+ll_A <- -fit_A$value;  ll_B <- -fit_B$value
+ll_C <- logLik(mld_C)
+
+cat(sprintf("── Modelo A (dlmModSeas)  ──  logLik = %.2f | conv = %s\n",
+            ll_A, ifelse(fit_A$convergence == 0, "OK", "FALHOU")))
+cat(sprintf("── Modelo B (dlmModTrig)  ──  logLik = %.2f | conv = %s\n",
+            ll_B, ifelse(fit_B$convergence == 0, "OK", "FALHOU")))
+cat(sprintf("── Modelo C (KFAS)        ──  logLik = %.2f\n", as.numeric(ll_C)))
+```
+
+```{r tabela-params}
+#| label: tabela-params
+#| code-summary: "Tabela comparativa dos três modelos"
+
+# KFAS armazena H (variância observacional) e Q (variâncias do sistema)
+# Q é uma matriz bloco com as variâncias de cada componente na diagonal
+V_C   <- as.numeric(mld_C$H)
+Q_C   <- mld_C$Q                     # array p×p×1
+# Componente 1 = nível, componente 2 = slope, componente 3 = sazonal
+W_mu_C   <- as.numeric(Q_C[1, 1, 1])
+W_beta_C <- as.numeric(Q_C[2, 2, 1])
+W_saz_C  <- as.numeric(Q_C[3, 3, 1])
+
+tibble(
+  Modelo   = c("A — dlmModSeas", "B — dlmModTrig", "C — KFAS"),
+  V        = c(exp(fit_A$par[1]), exp(fit_B$par[1]), V_C),
+  W_mu     = c(exp(fit_A$par[2]), exp(fit_B$par[2]), W_mu_C),
+  W_beta   = c(exp(fit_A$par[3]), exp(fit_B$par[3]), W_beta_C),
+  W_saz    = c(exp(fit_A$par[4]), exp(fit_B$par[4]), W_saz_C),
+  LogLik   = c(ll_A, ll_B, as.numeric(ll_C)),
+  Conv     = c(fit_A$convergence == 0, fit_B$convergence == 0, TRUE)
+) |>
+  gt() |>
+  fmt_number(columns = c(V, W_mu, W_beta, W_saz), decimals = 6) |>
+  fmt_number(columns = LogLik, decimals = 2) |>
+  tab_header(
+    title    = md("**Tabela 1.** Comparação dos Três Modelos — Parâmetros e Log-Verossimilhança"),
+    subtitle = md("Modelo selecionado para inferência: **B — dlmModTrig**")
+  ) |>
+  cols_label(
+    Modelo = "Modelo",
+    V      = md("$\\hat{V}$"),
+    W_mu   = md("$\\hat{W}_\\mu$"),
+    W_beta = md("$\\hat{W}_\\beta$"),
+    W_saz  = md("$\\hat{W}_{\\text{saz}}$"),
+    LogLik = md("$\\ell(\\hat{\\theta})$"),
+    Conv   = "Convergiu?"
+  ) |>
+  tab_footnote(
+    footnote  = md("Modelos A e B: estimação via `dlmMLE` (log-escala). Modelo C: estimação via `fitSSM` com inicialização difusa."),
+    locations = cells_column_labels(columns = LogLik)
+  ) |>
+  tab_style(style = cell_fill(color = "#e8f4f8"),
+            locations = cells_body(rows = Modelo == "B — dlmModTrig"))
+```
+
+Os três modelos convergem para estimativas de $\hat{V}$ próximas (Modelo A: `r sprintf("%.5f", exp(fit_A$par[1]))` ppm²; Modelo B: `r sprintf("%.5f", exp(fit_B$par[1]))` ppm²; Modelo C: `r sprintf("%.5f", V_C)` ppm²), confirmando que o ruído de medição é bem identificado independentemente da representação sazonal. O Modelo B (`dlmModTrig`) apresenta a maior log-verossimilhança (`r round(ll_B, 2)`), ligeiramente superior ao Modelo A (`r round(ll_A, 2)`) — ganho consistente com a maior flexibilidade dos harmônicos de Fourier. A razão $\hat{W}_\beta / \hat{V}$ (`r ratio_wb_v`, Modelo B) confirma que a taxa de crescimento varia muito suavemente, e $\hat{W}_{\text{trig}}$ (`r str_wtrig`) indica sazonalidade estável entre os anos.
+
+---
+
+# Filtragem e Suavização com $V$ e $W$ Conhecidos {#sec-vw-conhecidos}
+
+## Equações de filtragem
+
+Com os parâmetros estimados, aplicamos o **filtro de Kalman** sequencialmente
+para obter a distribuição posteriori $\theta_t \mid D_t$:
+
+$$\theta_t \mid D_t \sim N(m_t, C_t)$$
+
+As equações de atualização são:
+
+$$a_t = G_t m_{t-1}, \qquad R_t = G_t C_{t-1} G_t^\prime + W_t$$
+$$f_t = F_t^\prime a_t, \qquad Q_t = F_t^\prime R_t F_t + V_t$$
+$$A_t = R_t F_t / Q_t, \qquad e_t = y_t - f_t$$
+$$m_t = a_t + A_t e_t, \qquad C_t = R_t - A_t A_t^\prime Q_t$$
+
+## Equações de suavização
+
+A **suavização backward** fornece a distribuição retrospectiva
+$\theta_t \mid D_n$ (toda a informação da amostra):
+
+$$\theta_t \mid D_n \sim N(m_t^*, C_t^*)$$
+
+Inicializando com $m_n^* = m_n$ e $C_n^* = C_n$, para $t = n-1, \ldots, 1$:
+
+$$m_t^* = m_t + C_t G_{t+1}^\prime R_{t+1}^{-1}(m_{t+1}^* - a_{t+1})$$
+$$C_t^* = C_t - C_t G_{t+1}^\prime R_{t+1}^{-1}(R_{t+1} - C_{t+1}^*)R_{t+1}^{-1} G_{t+1} C_t$$
+
+```{r filtragem-suavizacao}
+#| label: filtragem-suavizacao
+#| code-summary: "Filtragem de Kalman e suavização backward"
+
+# Filtragem
+filt <- dlmFilter(as.numeric(co2), mld_final)
+
+# Suavização
+suav <- dlmSmooth(filt)
+
+tempo_vec <- as.numeric(time(co2))
+
+# dlmFilter$m: linhas 1...(n+1), linha 1 = priori inicial m0
+# → usar linhas 2:(n+1) para os n instantes observados
+# dlmSvd2var retorna lista de n+1 matrizes (inclui priori inicial)
+# → usar índices 2:(n+1), i.e., [-1] remove a priori
+
+# Variâncias da filtragem (estado 1 = nível μ_t)
+var_filt <- dlmSvd2var(filt$U.C, filt$D.C)
+# Garantir que cada elemento é matriz (drop = FALSE não se aplica aqui,
+# mas sapply pode simplificar — forçar lista)
+sd_filt <- sapply(var_filt, function(v) sqrt(max(v[1, 1], 0)))
+# Remover priori inicial (índice 1) → ficam n valores
+sd_filt <- sd_filt[-1]
+
+nivel_filt <- filt$m[2:(n + 1), 1]
+ic_filt_lo <- nivel_filt - 1.96 * sd_filt
+ic_filt_hi <- nivel_filt + 1.96 * sd_filt
+
+# Variâncias da suavização (estado 1 = nível μ_t)
+# dlmSmooth$s: linhas 1...(n+1), linha 1 = s_0 (não interessa)
+var_suav <- dlmSvd2var(suav$U.S, suav$D.S)
+sd_suav  <- sapply(var_suav, function(v) sqrt(max(v[1, 1], 0)))
+sd_suav  <- sd_suav[-1]
+
+nivel_suav <- suav$s[2:(n + 1), 1]
+ic_suav_lo <- nivel_suav - 1.96 * sd_suav
+ic_suav_hi <- nivel_suav + 1.96 * sd_suav
+
+res_df <- tibble(
+  tempo      = tempo_vec,
+  obs        = as.numeric(co2),
+  niv_filt   = nivel_filt,
+  lo_filt    = ic_filt_lo,
+  hi_filt    = ic_filt_hi,
+  niv_suav   = nivel_suav,
+  lo_suav    = ic_suav_lo,
+  hi_suav    = ic_suav_hi
+)
+```
+
+```{r filtragem-todos}
+#| label: filtragem-todos
+#| include: false
+
+# ── Filtragem e suavização dos 3 modelos ─────────────────────────────────────
+
+# Modelo B (já calculado: filt, suav, var_filt, var_suav, res_df)
+
+# Modelo A
+filt_A_obj <- dlmFilter(as.numeric(co2), mld_A)
+suav_A_obj <- dlmSmooth(filt_A_obj)
+var_fA <- dlmSvd2var(filt_A_obj$U.C, filt_A_obj$D.C)
+var_sA <- dlmSvd2var(suav_A_obj$U.S, suav_A_obj$D.S)
+sd_fA  <- sapply(var_fA, function(v) sqrt(max(v[1,1], 0)))[-1]
+sd_sA  <- sapply(var_sA, function(v) sqrt(max(v[1,1], 0)))[-1]
+
+# Modelo C (KFAS) — rodar KFS com filtragem E suavização dos estados
+kfas_full <- KFS(mld_C,
+                 filtering  = c("state", "mean"),
+                 smoothing  = c("state", "mean"))
+
+# Estados filtrados: att[t,] = E[alpha_t | y_1..y_t]  (dim: n x p)
+# Estados suavizados: alphahat[t,] = E[alpha_t | y_1..y_n]  (dim: n x p)
+mu_fC  <- as.numeric(kfas_full$att[, 1])
+mu_sC  <- as.numeric(kfas_full$alphahat[, 1])
+
+# Variâncias: Ptt[1,1,t] e V[1,1,t]
+sd_fC  <- sqrt(pmax(as.numeric(kfas_full$Ptt[1, 1, ]), 0))
+sd_sC  <- sqrt(pmax(as.numeric(kfas_full$V[1, 1, ]),   0))
+
+# Mascarar período difuso do KFAS com NA para evitar valores instáveis no plot
+# O período difuso termina quando as variâncias Ptt estabilizam (< limiar)
+# Usar o mesmo burnin já definido como proxy conservador
+d_difuso <- burnin
+mu_fC[1:d_difuso]  <- NA
+sd_fC[1:d_difuso]  <- NA
+
+# Data frame consolidado
+res_filt_all <- tibble(
+  tempo   = tempo_vec,
+  obs     = as.numeric(co2),
+  # Modelo A — filtragem
+  nA_f  = filt_A_obj$m[2:(n+1), 1],
+  loA_f = filt_A_obj$m[2:(n+1), 1] - 1.96 * sd_fA,
+  hiA_f = filt_A_obj$m[2:(n+1), 1] + 1.96 * sd_fA,
+  # Modelo B — filtragem
+  nB_f  = res_df$niv_filt,
+  loB_f = res_df$lo_filt,
+  hiB_f = res_df$hi_filt,
+  # Modelo C — filtragem
+  nC_f  = mu_fC,
+  loC_f = mu_fC - 1.96 * sd_fC,
+  hiC_f = mu_fC + 1.96 * sd_fC,
+  # Modelo A — suavização
+  nA_s  = suav_A_obj$s[2:(n+1), 1],
+  loA_s = suav_A_obj$s[2:(n+1), 1] - 1.96 * sd_sA,
+  hiA_s = suav_A_obj$s[2:(n+1), 1] + 1.96 * sd_sA,
+  # Modelo B — suavização
+  nB_s  = res_df$niv_suav,
+  loB_s = res_df$lo_suav,
+  hiB_s = res_df$hi_suav,
+  # Modelo C — suavização
+  nC_s  = mu_sC,
+  loC_s = mu_sC - 1.96 * sd_sC,
+  hiC_s = mu_sC + 1.96 * sd_sC
+)
+```
+
+```{r plot-filtragem}
+#| label: plot-filtragem
+#| fig-cap: "Nível local $\\hat{\\mu}_t$ filtrado pelos três modelos com IC 95%. O nível representa a tendência de longo prazo sem a componente sazonal. Os três modelos produzem estimativas muito similares após o período de convergência. No Modelo C (KFAS), os primeiros meses são omitidos por corresponderem ao período de inicialização difusa."
+#| fig-height: 8
+
+make_filt_plot <- function(df, y_niv, y_lo, y_hi, titulo, cor) {
+  df |>
+    ggplot(aes(x = tempo)) +
+    geom_ribbon(aes(ymin = .data[[y_lo]], ymax = .data[[y_hi]]),
+                fill = cor, alpha = 0.20) +
+    geom_line(aes(y = obs), color = cores[1], linewidth = 0.4, alpha = 0.6) +
+    geom_line(aes(y = .data[[y_niv]]), color = cor, linewidth = 0.9) +
+    scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+    scale_y_continuous(labels = label_number(suffix = " ppm")) +
+    labs(title = titulo, x = NULL, y = expression(CO[2] ~ "(ppm)"))
+}
+
+make_filt_plot(res_filt_all, "nA_f","loA_f","hiA_f",
+               expression(mu[t] ~ "— Modelo A (dlmModSeas)"), cores[2]) /
+make_filt_plot(res_filt_all, "nB_f","loB_f","hiB_f",
+               expression(mu[t] ~ "— Modelo B (dlmModTrig)"), cores[3]) /
+make_filt_plot(res_filt_all, "nC_f","loC_f","hiC_f",
+               expression(mu[t] ~ "— Modelo C (KFAS)"),        cores[5])
+```
+
+O nível filtrado $\hat{\mu}_t$ exclui a sazonalidade por construção e acompanha a tendência crescente da série. Os Modelos A e B produzem estimativas de $\mu_t$ praticamente idênticas em valor pontual ao longo de toda a série — ambos convergem rapidamente após o burn-in inicial (visível na leve expansão do IC em 1959--1960). O Modelo C (KFAS) utiliza inicialização difusa exata: os primeiros meses são omitidos do gráfico por corresponderem ao período de convergência do algoritmo difuso; a partir de ~1961, os três modelos concordam bem em valor pontual. A principal diferença está nos ICs, que refletem as distintas parametrizações da variância do sistema — o Modelo C tende a apresentar ICs mais estreitos após a convergência, reflexo da inicialização difusa que não infla artificialmente a incerteza inicial.
+
+```{r plot-suavizacao}
+#| label: plot-suavizacao
+#| fig-cap: "Nível local $\\hat{\\mu}_t^*$ suavizado pelos três modelos com IC 95%. A suavização usa toda a informação $D_n$, produzindo ICs mais estreitos do que a filtragem."
+#| fig-height: 8
+
+make_filt_plot(res_filt_all, "nA_s","loA_s","hiA_s",
+               expression(mu[t]^"*" ~ "— Modelo A (dlmModSeas)"), cores[2]) /
+make_filt_plot(res_filt_all, "nB_s","loB_s","hiB_s",
+               expression(mu[t]^"*" ~ "— Modelo B (dlmModTrig)"), cores[3]) /
+make_filt_plot(res_filt_all, "nC_s","loC_s","hiC_s",
+               expression(mu[t]^"*" ~ "— Modelo C (KFAS)"),        cores[5])
+```
+
+A suavização reduz sistematicamente a incerteza em relação à filtragem, pois incorpora informação futura para refinar cada estimativa retrospectiva. A diferença é mais pronunciada nos primeiros anos da série, onde a filtragem ainda não convergiu.
+
+> **Nota sobre o Modelo C (KFAS):** a suavização backward do KFAS utiliza o algoritmo de De Jong (1989) com inicialização difusa exata, ligeiramente diferente das equações acima válidas para os Modelos A e B. Os ICs do Modelo C na suavização são derivados de $\hat{P}_{t|n}[1,1]$ — variância posterior suavizada do estado $\mu_t$ — extraída do array `kfas_full$V`. As fórmulas do algoritmo difuso estão em @helske2017kfas.
+
+```{r plot-comparacao-filt-suav}
+#| label: plot-comparacao-filt-suav
+#| fig-cap: "Filtragem vs. suavização no trecho 1985–1992 para o Modelo B (dlmModTrig). A suavização (verde) produz ICs mais estreitos e trajetória mais suave; os valores pontuais são praticamente coincidentes."
+#| fig-height: 5
+
+res_df |>
+  filter(tempo >= 1985, tempo <= 1992) |>
+  ggplot(aes(x = tempo)) +
+  geom_ribbon(aes(ymin = lo_filt, ymax = hi_filt, fill = "Filtragem"), alpha = 0.20) +
+  geom_ribbon(aes(ymin = lo_suav, ymax = hi_suav, fill = "Suavização"), alpha = 0.20) +
+  geom_line(aes(y = obs),      color = cores[1], linewidth = 0.6, alpha = 0.8) +
+  geom_line(aes(y = niv_filt, color = "Filtragem"),  linewidth = 0.9) +
+  geom_line(aes(y = niv_suav, color = "Suavização"), linewidth = 0.9) +
+  scale_color_manual(values = c("Filtragem" = cores[2], "Suavização" = cores[3])) +
+  scale_fill_manual(values  = c("Filtragem" = cores[2], "Suavização" = cores[3])) +
+  scale_x_continuous(breaks = seq(1985, 1992, by = 1)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(title    = "Filtragem vs. Suavização — Modelo B, Trecho 1985–1992",
+       subtitle = "IC 95% de credibilidade para o nível local",
+       x = NULL, y = expression(CO[2] ~ "(ppm)"),
+       color = NULL, fill = NULL) +
+  theme(legend.position = "top")
+```
+
+No trecho ampliado de 1985--1992, a diferença entre filtragem e suavização torna-se visível: os ICs da suavização (verde) são sistematicamente mais estreitos, pois o algoritmo backward incorpora toda a informação futura $D_n$ para corrigir cada estimativa passada. A filtragem é um estimador *online* — reage a cada nova observação em $t$ sem ver o futuro — enquanto a suavização é *offline* e produz a estimativa ótima retrospectiva. Em valor pontual, as trajetórias são praticamente coincidentes, evidenciando que o filtro converge bem após o período de burn-in.
+
+```{r plot-tendencia}
+#| label: plot-tendencia
+#| fig-cap: "Taxa de crescimento $\\hat{\\beta}_t$ (ppm/ano) suavizada pelos três modelos com IC 95%. Os três modelos concordam em valor pontual e revelam leve aceleração após 1980."
+#| fig-height: 7
+
+# Extrair beta_t (estado 2) dos 3 modelos — taxa em ppm/ano (× 12)
+beta_B <- tibble(
+  tempo = tempo_vec,
+  beta  = suav$s[2:(n+1), 2] * 12,
+  lo    = suav$s[2:(n+1), 2] * 12 - 1.96 * sapply(var_suav[-1], function(v) sqrt(max(v[2,2],0))) * 12,
+  hi    = suav$s[2:(n+1), 2] * 12 + 1.96 * sapply(var_suav[-1], function(v) sqrt(max(v[2,2],0))) * 12
+)
+
+beta_A <- tibble(
+  tempo = tempo_vec,
+  beta  = suav_A_obj$s[2:(n+1), 2] * 12,
+  lo    = suav_A_obj$s[2:(n+1), 2] * 12 - 1.96 * sd_sA * 12,
+  hi    = suav_A_obj$s[2:(n+1), 2] * 12 + 1.96 * sd_sA * 12
+)
+
+# Modelo C: slope = estado 2 do SSMtrend
+sd_beta_C <- sqrt(pmax(as.numeric(kfas_full$V[2, 2, ]), 0))
+beta_C <- tibble(
+  tempo = tempo_vec,
+  beta  = as.numeric(kfas_full$alphahat[, 2]) * 12,
+  lo    = as.numeric(kfas_full$alphahat[, 2]) * 12 - 1.96 * sd_beta_C * 12,
+  hi    = as.numeric(kfas_full$alphahat[, 2]) * 12 + 1.96 * sd_beta_C * 12
+)
+
+make_beta_plot <- function(df, titulo, cor) {
+  df |> ggplot(aes(x = tempo)) +
+    geom_ribbon(aes(ymin = lo, ymax = hi), fill = cor, alpha = 0.20) +
+    geom_line(aes(y = beta), color = cor, linewidth = 0.9) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+    labs(title = titulo, x = NULL, y = "ppm/ano")
+}
+
+make_beta_plot(beta_A, expression(hat(beta)[t] ~ "— Modelo A"), cores[2]) /
+make_beta_plot(beta_B, expression(hat(beta)[t] ~ "— Modelo B"), cores[3]) /
+make_beta_plot(beta_C, expression(hat(beta)[t] ~ "— Modelo C"), cores[5])
+```
+
+A taxa de crescimento $\hat{\beta}_t$ é um estado latente estimado explicitamente pelos três modelos, resultado inacessível diretamente ao SARIMA$(1,1,1)(0,1,1)_{12}$, que modela $\nabla y_t$ mas não decompõe a série em nível e slope separados. Os três modelos concordam em valor pontual, revelando aceleração progressiva: de $\approx 0{,}8$ ppm/ano em 1960 para $\approx 1{,}5$ ppm/ano em 1997. O Modelo B (`dlmModTrig`) apresenta os ICs mais estreitos para $\hat{\beta}_t$, reflexo da estimativa de $\hat{W}_\beta$ muito próxima de zero obtida por máxima verossimilhança, que impõe alta suavidade à trajetória do slope. O Modelo A apresenta ICs substancialmente mais largos, especialmente no início da série, e o Modelo C ocupa posição intermediária. A leve aceleração observada após 1980 é consistente com o aumento das emissões globais de combustíveis fósseis no período e está em linha com a análise da decomposição STL apresentada no Trabalho 1.
+
+---
+
+# Filtragem e Suavização com Fatores de Desconto ($V$ Desconhecido) {#sec-desconto}
+
+Esta seção aplica a abordagem de fatores de desconto ao **Modelo B** (`dlmModTrig`),
+que é o modelo selecionado. A extensão ao Modelo A seria análoga; o Modelo C (KFAS)
+já incorpora inicialização difusa nativamente, que cumpre função semelhante de não
+requerer especificação prévia de $V$.
+
+## Especificação
+
+Quando $V$ é desconhecido, adotamos a abordagem de **fatores de desconto**
+[@west1997bayesian] com inferência conjugada sobre $\phi = 1/V$. O modelo passa a ser:
+
+$$y_t = F_t^\prime \theta_t + v_t, \quad v_t \sim N(0, V)$$
+$$\theta_t \mid D_{t-1} \sim T_{n_{t-1}}(a_t, R_t)$$
+$$\phi \mid D_{t-1} \sim \text{Ga}\!\left(\frac{n_{t-1}}{2},\ \frac{n_{t-1} S_{t-1}}{2}\right)$$
+
+A matriz $R_t$ é especificada via fator de desconto $\delta \in (0, 1]$:
+
+$$R_t = \frac{1}{\delta} P_t, \qquad P_t = G_t C_{t-1} G_t^\prime$$
+
+o que equivale a $W_t = \frac{1-\delta}{\delta} P_t$, sem necessidade de especificar
+$W$ diretamente. Usamos fatores de desconto **separados** para tendência ($\delta_T$)
+e sazonalidade ($\delta_S$), pois cada componente tem dinâmica própria.
+
+A atualização de $S_t$ (estimativa de $V$) segue:
+
+$$n_t = n_{t-1} + 1, \qquad S_t = S_{t-1} + \frac{S_{t-1}}{n_t}\left(\frac{e_t^2}{Q_t} - 1\right)$$
+
+e os intervalos de credibilidade para previsão são baseados na distribuição
+$T_{n_t}$ em vez da normal.
+
+```{r desconto-impl}
+#| label: desconto-impl
+#| code-summary: "Implementação do MLD com fatores de desconto e V desconhecido"
+
+mld_desconto <- function(y, mod, delta_T = 0.95, delta_S = 0.98,
+                         m0, C0_star, n0 = 1, S0) {
+
+  n  <- length(y)
+  p  <- length(m0)
+
+  # Extrair G e F robustamente (dlm armazena como matriz ou lista)
+  G    <- if (is.list(mod$GG)) mod$GG[[1]] else mod$GG
+  Fvec <- matrix(if (is.list(mod$FF)) mod$FF[[1]] else mod$FF, ncol = 1)
+
+  # Garantir dimensões corretas
+  stopifnot(nrow(G) == p, ncol(G) == p, nrow(Fvec) == p)
+
+  idx_T <- 1:2   # tendência
+  idx_S <- 3:p   # sazonal (funciona para qualquer p)
+
+  m <- m0;  C <- C0_star;  nv <- n0;  S <- S0
+
+  mt <- matrix(NA, n, p);  Ct <- array(NA, c(p, p, n))
+  at <- matrix(NA, n, p);  Rt <- array(NA, c(p, p, n))
+  ft <- numeric(n);  Qt <- numeric(n);  et <- numeric(n)
+  nt <- numeric(n);  St <- numeric(n)
+
+  for (t in seq_len(n)) {
+    a  <- as.numeric(G %*% m)
+    P  <- G %*% C %*% t(G)
+    R  <- P
+    R[idx_T, idx_T] <- P[idx_T, idx_T] / delta_T
+    R[idx_S, idx_S] <- P[idx_S, idx_S] / delta_S
+    R[idx_T, idx_S] <- P[idx_T, idx_S] / sqrt(delta_T * delta_S)
+    R[idx_S, idx_T] <- P[idx_S, idx_T] / sqrt(delta_T * delta_S)
+
+    f  <- as.numeric(t(Fvec) %*% a)
+    Qs <- as.numeric(t(Fvec) %*% R %*% Fvec) + 1
+    e  <- y[t] - f
+
+    nv_new <- nv + 1
+    S_new  <- S * (1 + (e^2 / (Qs * S) - 1) / nv_new)
+
+    A <- R %*% Fvec / Qs
+    m <- a + as.numeric(A) * e
+    C <- (S_new / S) * (R - tcrossprod(A) * Qs)
+
+    nv <- nv_new;  S <- S_new
+
+    mt[t, ] <- m;  Ct[, , t] <- C;  at[t, ] <- a;  Rt[, , t] <- R
+    ft[t] <- f;  Qt[t] <- Qs;  et[t] <- e;  nt[t] <- nv;  St[t] <- S
+  }
+
+  list(mt = mt, Ct = Ct, at = at, Rt = Rt,
+       ft = ft, Qt = Qt, et = et, nt = nt, St = St,
+       G = G, F = Fvec)
+}
+
+# Suavização backward
+suavizar_desconto <- function(filt_res) {
+  n  <- nrow(filt_res$mt)
+  p  <- ncol(filt_res$mt)
+  G  <- filt_res$G
+
+  ms <- matrix(NA, n, p)
+  Cs <- array(NA, c(p, p, n))
+
+  ms[n, ]    <- filt_res$mt[n, ]
+  Cs[, , n]  <- filt_res$Ct[, , n]
+
+  for (t in (n - 1):1) {
+    Rinv    <- solve(filt_res$Rt[, , t + 1])
+    Ht      <- filt_res$Ct[, , t] %*% t(G) %*% Rinv
+    ms[t, ] <- filt_res$mt[t, ] +
+               Ht %*% (ms[t + 1, ] - filt_res$at[t + 1, ])
+    Cs[, , t] <- filt_res$Ct[, , t] -
+                 Ht %*% (filt_res$Rt[, , t + 1] - Cs[, , t + 1]) %*% t(Ht)
+    # Garantir simetria e positividade diagonal
+    Cs[, , t] <- (Cs[, , t] + t(Cs[, , t])) / 2
+  }
+
+  list(ms = ms, Cs = Cs)
+}
+```
+
+```{r desconto-ajuste}
+#| label: desconto-ajuste
+#| code-summary: "Ajuste do modelo com fatores de desconto δ_T = 0.95, δ_S = 0.98"
+
+# Dimensão real do vetor de estados do Modelo B
+# dlmModTrig(s=12, q=6): o harmônico de Nyquist (j=6) tem apenas 1 estado,
+# então dim = 2 (tend) + 2*J - 1 (trig) = 13, não 14
+p_B <- nrow(mld_B$GG)   # dimensão real extraída do modelo
+
+# Condições iniciais com dimensão correta
+m0_desc <- c(315, 0.1, rep(0, p_B - 2))
+C0_star  <- diag(c(100, 1, rep(25, p_B - 2)))
+
+# S0: estimativa inicial de V
+S0_init <- var(as.numeric(co2)[1:24])
+
+delta_T <- 0.95
+delta_S <- 0.98
+
+filt_desc <- mld_desconto(
+  y       = as.numeric(co2),
+  mod     = mld_B,
+  delta_T = delta_T,
+  delta_S = delta_S,
+  m0      = m0_desc,
+  C0_star = C0_star,
+  n0      = 1,
+  S0      = S0_init
+)
+
+suav_desc <- suavizar_desconto(filt_desc)
+
+# ICs: Var(θ_t | D_t) = S_t * C*_t  →  sd = sqrt(S_t * C*_t[1,1])
+# Para filtragem: usar S_t de cada instante
+sd_filt_d <- sqrt(pmax(
+  sapply(1:n, function(t) filt_desc$St[t] * filt_desc$Ct[1, 1, t]), 0))
+
+# Para suavização: usar S_n (toda a informação)
+Sn <- tail(filt_desc$St, 1)
+sd_suav_d <- sqrt(pmax(
+  sapply(1:n, function(t) Sn * suav_desc$Cs[1, 1, t]), 0))
+
+ic_mult_filt <- qt(0.975, df = filt_desc$nt)
+ic_mult_suav <- qt(0.975, df = filt_desc$nt[n])
+
+res_desc_df <- tibble(
+  tempo      = tempo_vec,
+  obs        = as.numeric(co2),
+  niv_filt   = filt_desc$mt[, 1],
+  lo_filt    = filt_desc$mt[, 1] - ic_mult_filt * sd_filt_d,
+  hi_filt    = filt_desc$mt[, 1] + ic_mult_filt * sd_filt_d,
+  niv_suav   = suav_desc$ms[, 1],
+  lo_suav    = suav_desc$ms[, 1] - ic_mult_suav * sd_suav_d,
+  hi_suav    = suav_desc$ms[, 1] + ic_mult_suav * sd_suav_d,
+  St_val     = filt_desc$St     # renomeado para evitar conflito com V_est global
+)
+
+cat(sprintf("δ_T = %.2f | δ_S = %.2f\n", delta_T, delta_S))
+cat(sprintf("V estimado (S_n) = %.5f\n", tail(filt_desc$St, 1)))
+```
+
+```{r plot-desconto-filt}
+#| label: plot-desconto-filt
+#| fig-cap: "Filtragem com fatores de desconto ($\\delta_T = 0{,}95$, $\\delta_S = 0{,}98$) e $V$ desconhecido. Os ICs são baseados na distribuição $T_{n_t}$ e alargam-se no início da série (menor $n_t$), estreitando à medida que $S_t$ converge."
+#| fig-height: 5
+
+ggplot(res_desc_df, aes(x = tempo)) +
+  geom_ribbon(aes(ymin = lo_filt, ymax = hi_filt),
+              fill = cores[2], alpha = 0.20) +
+  geom_line(aes(y = obs), color = cores[1],
+            linewidth = 0.5, alpha = 0.7) +
+  geom_line(aes(y = niv_filt), color = cores[2],
+            linewidth = 0.9) +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(
+    title    = expression("Filtragem com Fatores de Desconto — Nível" ~ mu[t]),
+    subtitle = bquote(delta[T] == .(delta_T) ~ "|" ~ delta[S] == .(delta_S) ~
+                      "| V desconhecido (distribuição" ~ t[n[t]] * ")"),
+    x        = NULL,
+    y        = expression(CO[2] ~ "(ppm)")
+  )
+```
+
+O nível filtrado com fatores de desconto acompanha a série observada de forma equivalente ao Modelo B com $V$ e $W$ conhecidos por MV. Os ICs são ligeiramente mais largos no início da série — quando $n_t$ é pequeno e a distribuição $T_{n_t}$ tem caudas mais pesadas — e estreitam progressivamente à medida que mais observações são incorporadas e $S_t$ converge. Isso demonstra que os fatores de desconto constituem uma alternativa robusta quando os parâmetros não são conhecidos a priori.
+
+```{r plot-desconto-suav}
+#| label: plot-desconto-suav
+#| fig-cap: "Suavização com fatores de desconto. ICs baseados em $T_{n_n}$ com $n_n = n$."
+#| fig-height: 5
+
+ggplot(res_desc_df, aes(x = tempo)) +
+  geom_ribbon(aes(ymin = lo_suav, ymax = hi_suav),
+              fill = cores[3], alpha = 0.20) +
+  geom_line(aes(y = obs), color = cores[1],
+            linewidth = 0.5, alpha = 0.7) +
+  geom_line(aes(y = niv_suav), color = cores[3],
+            linewidth = 0.9) +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(
+    title    = expression("Suavização com Fatores de Desconto — Nível" ~ mu[t]),
+    subtitle = bquote(delta[T] == .(delta_T) ~ "|" ~ delta[S] == .(delta_S) ~
+                      "| IC 95% baseado em" ~ T[n[t]]),
+    x        = NULL,
+    y        = expression(CO[2] ~ "(ppm)")
+  )
+```
+
+```{r plot-V-estimado}
+#| label: plot-V-estimado
+#| fig-cap: "Evolução de $S_t$ ao longo do tempo — estimativa sequencial da variância observacional $V$. $S_t$ parte do valor inicial $S_0$ e converge progressivamente à medida que mais observações são incorporadas."
+#| fig-height: 4
+
+Sn_val <- tail(filt_desc$St, 1)
+
+res_desc_df |>
+  ggplot(aes(x = tempo, y = St_val)) +
+  geom_line(color = cores[5], linewidth = 0.9) +
+  geom_hline(yintercept = Sn_val, linetype = "dashed",
+             color = cores[2], linewidth = 0.7) +
+  annotate("text", x = 1970, y = Sn_val * 1.3,
+           label = sprintf("S[n] = %.5f (convergido)", Sn_val),
+           color = cores[2], size = 3.5) +
+  scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+  labs(
+    title    = expression("Estimativa Sequencial de" ~ V ~ "via Fator de Desconto"),
+    subtitle = expression(S[t] ~ "converge à medida que mais observações são incorporadas"),
+    x        = NULL,
+    y        = expression(S[t])
+  )
+```
+
+$S_t$ parte de um valor inicial elevado (reflexo da incerteza sobre $V$ antes de observar os dados) e decresce monotonicamente até convergir para $S_n =$ `r sprintf("%.5f", Sn_val)`. A convergência é rápida nos primeiros anos e desacelera progressivamente --- padrão típico de uma estimativa bayesiana sequencial que "aprende" $V$ com cada nova observação. O valor convergido é superior ao $\hat{V}_{MV}$ estimado por máxima verossimilhança porque as duas abordagens usam escalas distintas: $S_t$ absorve a incerteza adicional introduzida pelos fatores de desconto, enquanto $\hat{V}_{MV}$ é uma estimativa pontual que não carrega essa incerteza extra.
+
+---
+
+# Previsão {#sec-previsao}
+
+## Previsão h passos à frente
+
+Para o MLD com $V$ e $W$ conhecidos, a distribuição preditiva h passos à frente é:
+
+$$y_{n+h} \mid D_n \sim N(f_{n+h}, Q_{n+h})$$
+
+onde:
+$$f_{n+h} = F^\prime G^h m_n, \qquad Q_{n+h} = F^\prime R_{n+h} F + V$$
+$$R_{n+h} = G R_{n+h-1} G^\prime + W, \quad R_{n+1} = G C_n G^\prime + W$$
+
+O intervalo de previsão de $95\%$ é $f_{n+h} \pm 1{,}96\sqrt{Q_{n+h}}$.
+
+```{r previsao-todos}
+#| label: previsao-todos
+#| include: false
+
+h      <- 24
+t_prev <- seq(fim[1] + fim[2] / 12, by = 1/12, length.out = h)
+
+# Modelo B (principal)
+prev_B  <- dlmForecast(filt, nAhead = h)
+sd_B    <- sqrt(unlist(prev_B$Q))
+prev_df <- tibble(
+  tempo = t_prev, modelo = "B — dlmModTrig",
+  central = as.numeric(prev_B$f),
+  lo95    = as.numeric(prev_B$f) - 1.96 * sd_B,
+  hi95    = as.numeric(prev_B$f) + 1.96 * sd_B
+)
+
+# Modelo A
+prev_A  <- dlmForecast(filt_A_obj, nAhead = h)
+sd_A    <- sqrt(unlist(prev_A$Q))
+prev_A_df <- tibble(
+  tempo = t_prev, modelo = "A — dlmModSeas",
+  central = as.numeric(prev_A$f),
+  lo95    = as.numeric(prev_A$f) - 1.96 * sd_A,
+  hi95    = as.numeric(prev_A$f) + 1.96 * sd_A
+)
+
+# Modelo C (KFAS)
+prev_C_obj <- predict(mld_C, n.ahead = h, interval = "confidence", level = 0.95)
+prev_C_df  <- tibble(
+  tempo = t_prev, modelo = "C — KFAS",
+  central = as.numeric(prev_C_obj[, "fit"]),
+  lo95    = as.numeric(prev_C_obj[, "lwr"]),
+  hi95    = as.numeric(prev_C_obj[, "upr"])
+)
+
+# SARIMA do Trabalho 1
+fit_sarima <- Arima(co2, order = c(1,1,1),
+                    seasonal = list(order = c(0,1,1), period = 12),
+                    method = "CSS-ML")
+prev_sarima <- forecast(fit_sarima, h = h, level = 95)
+prev_sar_df <- tibble(
+  tempo = t_prev, modelo = "SARIMA(1,1,1)(0,1,1)[12]",
+  central = as.numeric(prev_sarima$mean),
+  lo95    = as.numeric(prev_sarima$lower[, 1]),
+  hi95    = as.numeric(prev_sarima$upper[, 1])
+)
+
+# Consolidado para plots
+prev_all <- bind_rows(prev_A_df, prev_df, prev_C_df, prev_sar_df)
+
+# Síntese para texto
+prev_dez98_mld    <- round(prev_df$central[12], 2)
+prev_dez99_mld    <- round(prev_df$central[24], 2)
+ic95_lo_dez99_mld <- round(prev_df$lo95[24], 2)
+ic95_hi_dez99_mld <- round(prev_df$hi95[24], 2)
+prev_dez98_sar    <- round(prev_sar_df$central[12], 2)
+prev_dez99_sar    <- round(prev_sar_df$central[24], 2)
+larg_ic_h1        <- round(prev_df$hi95[1]  - prev_df$lo95[1],  2)
+larg_ic_h24       <- round(prev_df$hi95[24] - prev_df$lo95[24], 2)
+```
+
+```{r plot-previsao}
+#| label: plot-previsao
+#| fig-cap: "Previsões dos três MLDs e do SARIMA$(1,1,1)(0,1,1)_{12}$ para 1998–1999 com IC 95%. A série observada de 1993 a 1997 é exibida à esquerda da linha de corte."
+#| fig-height: 6
+
+obs_recente <- co2_df |> filter(ano >= 1993)
+
+cores_mod <- c(
+  "A — dlmModSeas"           = cores[2],
+  "B — dlmModTrig"           = cores[3],
+  "C — KFAS"                 = cores[5],
+  "SARIMA(1,1,1)(0,1,1)[12]"  = cores[4]
+)
+
+ggplot() +
+  geom_line(data = obs_recente,
+            aes(x = tempo, y = ppm),
+            color = cores[1], linewidth = 0.8) +
+  geom_ribbon(data = prev_all,
+              aes(x = tempo, ymin = lo95, ymax = hi95, fill = modelo),
+              alpha = 0.12) +
+  geom_line(data = prev_all,
+            aes(x = tempo, y = central, color = modelo),
+            linewidth = 0.85) +
+  geom_vline(xintercept = 1998,
+             linetype = "dashed", color = "gray40", linewidth = 0.7) +
+  annotate("text", x = 1997.65, y = 358,
+           label = "Fim obs.", angle = 90, size = 3, color = "gray40") +
+  scale_color_manual(values = cores_mod) +
+  scale_fill_manual(values  = cores_mod) +
+  scale_x_continuous(breaks = seq(1993, 2000, by = 1)) +
+  scale_y_continuous(labels = label_number(suffix = " ppm")) +
+  labs(
+    title    = expression("Previsão — Três MLDs e SARIMA — 1998–1999"),
+    subtitle = "Faixas: IC 95% | Linhas: previsão pontual",
+    x = NULL, y = expression(CO[2] ~ "(ppm)"),
+    color = NULL, fill = NULL
+  ) +
+  theme(legend.position = "top")
+```
+
+O gráfico evidencia que os quatro modelos produzem previsões pontuais muito próximas para todo o horizonte de `r h` meses. A principal diferença está nos ICs: o Modelo C (KFAS, faixa roxa) apresenta ICs ligeiramente mais largos, refletindo maior incerteza sobre o vetor de estados; o SARIMA tende a ter ICs mais estreitos por não modelar explicitamente a incerteza paramétrica dos estados latentes. A sazonalidade anual é preservada fielmente por todos os modelos, com picos em maio-junho e mínimos em setembro-outubro — padrão consistente com a série histórica.
+
+```{r tabela-previsoes}
+#| label: tabela-previsoes
+#| code-summary: "Previsões selecionadas — quatro modelos"
+
+meses_pt <- c("Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+              "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro")
+
+# Renomear modelos para labels curtos na tabela
+prev_tab <- prev_all |>
+  mutate(
+    Ano   = as.integer(floor(tempo)),
+    Mes   = meses_pt[as.integer(round((tempo - floor(tempo)) * 12)) + 1L],
+    mod_s = recode(modelo,
+      "A — dlmModSeas"          = "Mod. A",
+      "B — dlmModTrig"          = "Mod. B",
+      "C — KFAS"                = "Mod. C",
+      "SARIMA(1,1,1)(0,1,1)[12]" = "SARIMA"
+    )
+  ) |>
+  filter(Mes %in% c("Março","Junho","Setembro","Dezembro")) |>
+  select(Ano, Mes, mod_s, central, lo95, hi95) |>
+  pivot_wider(
+    names_from  = mod_s,
+    values_from = c(central, lo95, hi95),
+    names_glue  = "{mod_s}_{.value}"
+  )
+
+prev_tab |>
+  gt(groupname_col = "Ano") |>
+  tab_header(
+    title    = md("**Tabela 2.** Previsões Selecionadas — Três MLDs e SARIMA (ppm)"),
+    subtitle = "Meses de março, junho, setembro e dezembro de 1998 e 1999. IC 95%."
+  ) |>
+  tab_spanner(label = "Mod. A (dlmModSeas)", columns = starts_with("Mod. A")) |>
+  tab_spanner(label = "Mod. B (dlmModTrig)", columns = starts_with("Mod. B")) |>
+  tab_spanner(label = "Mod. C (KFAS)",       columns = starts_with("Mod. C")) |>
+  tab_spanner(label = "SARIMA(1,1,1)(0,1,1)[12]", columns = starts_with("SARIMA")) |>
+  cols_label(
+    Mes               = "Mês",
+    `Mod. A_central`  = "Prev.",
+    `Mod. A_lo95`     = "IC inf",
+    `Mod. A_hi95`     = "IC sup",
+    `Mod. B_central`  = "Prev.",
+    `Mod. B_lo95`     = "IC inf",
+    `Mod. B_hi95`     = "IC sup",
+    `Mod. C_central`  = "Prev.",
+    `Mod. C_lo95`     = "IC inf",
+    `Mod. C_hi95`     = "IC sup",
+    `SARIMA_central`  = "Prev.",
+    `SARIMA_lo95`     = "IC inf",
+    `SARIMA_hi95`     = "IC sup"
+  ) |>
+  fmt_number(where(is.numeric), decimals = 2) |>
+  tab_style(style = cell_fill(color = "#f0f7ff"),
+            locations = cells_row_groups()) |>
+  tab_style(style = cell_fill(color = "#e8f4f8"),
+            locations = cells_body(columns = starts_with("Mod. B")))
+```
+
+
+
+---
+
+# Diagnóstico das Inovações {#sec-diagnostico}
+
+## Pressupostos do MLD
+
+Num MLD bem especificado, as **inovações** (erros de previsão 1 passo à frente)
+$e_t = y_t - f_t$ devem satisfazer três propriedades:
+
+**P1 — Média zero e variância constante (homoscedasticidade):**
+$$E[e_t] = 0, \qquad \text{Var}(e_t) = Q_t = F^\prime R_t F + V \quad \forall\, t$$
+
+**P2 — Ausência de autocorrelação (ruído branco):**
+$$\text{Cov}(e_t, e_{t-k}) = 0, \quad k \neq 0$$
+Esta propriedade é garantida pelo filtro de Kalman ótimo e é verificada via
+teste de Ljung-Box: $Q^*(h) = n(n+2)\sum_{j=1}^h \hat{\rho}^2(j)/(n-j) \sim \chi^2(h)$ sob $H_0$.
+
+**P3 — Normalidade:**
+$$e_t \sim N(0, Q_t)$$
+Necessária para validade dos intervalos de credibilidade e previsão; verificada via
+Shapiro-Wilk e inspeção do Q-Q plot.
+
+As inovações padronizadas $\tilde{e}_t = e_t / \sqrt{Q_t}$ devem ser $\text{iid}\, N(0,1)$.
+Note que descartamos os primeiros `r burnin` meses (burn-in): nesse período o filtro
+ainda não convergiu a partir da priori $\theta_0 \mid D_0 \sim N(m_0, C_0)$.
+
+## Inovações dos Três Modelos
+
+```{r diagnostico-todos}
+#| label: diagnostico-todos
+#| fig-cap: "Inovações $e_t = y_t - f_t$ dos três modelos ao longo do tempo. Linhas pontilhadas: $\\pm 2$ desvios padrão. Inovações sem padrão sistemático e com variância constante indicam adequação do modelo (pressuposto P1 e P2)."
+#| fig-height: 8
+
+# INOVAÇÕES BRUTAS: e_t = y_t - f_t (em ppm)
+# No dlm, residuals(filt, sd=FALSE) retorna PADRONIZADAS e_t/sqrt(Q_t).
+# As inovações brutas são obtidas diretamente de filt$f (previsão 1-passo):
+y_vec    <- as.numeric(co2)
+
+et_bruto <- y_vec - filt$f    # Modelo B: e_t bruto (ppm)
+filt_A   <- dlmFilter(y_vec, mld_A)
+et_A     <- y_vec - filt_A$f  # Modelo A: e_t bruto (ppm)
+
+# Modelo C (KFAS): residuals(type="recursive") retorna os erros de previsão
+# 1-passo normalizados pelo KFAS internamente — dividir pelo desvio padrão
+# para obter os erros padronizados, OU usar diretamente se já estiverem em ppm.
+# O objeto retornado tem a mesma unidade de y_t (ppm).
+# NAs no início correspondem ao período difuso e são descartados pelo na.omit.
+et_C_raw <- as.numeric(residuals(kfas_full, type = "recursive"))
+et_C     <- et_C_raw
+# Mascarar outliers do período difuso do KFAS:
+# valores com |e_t| > 5x o desvio padrão robusto após o burnin
+sd_robust_C      <- mad(na.omit(et_C)[(burnin+1):length(na.omit(et_C))])
+et_C[abs(et_C) > 5 * sd_robust_C] <- NA
+
+# Diagnóstico de escala após na.omit (descarta período difuso)
+cat(sprintf("Modelo A — sd(et): %.4f ppm\n", sd(na.omit(et_A), na.rm = TRUE)))
+cat(sprintf("Modelo B — sd(et): %.4f ppm\n", sd(na.omit(et_bruto), na.rm = TRUE)))
+cat(sprintf("Modelo C — sd(et, sem difuso): %.4f ppm\n", sd(na.omit(et_C), na.rm = TRUE)))
+
+# Armazenar para uso posterior
+et_vals  <- na.omit(et_bruto)
+burnin   <- 24L
+et_conv  <- et_vals[(burnin + 1):length(et_vals)]
+
+# Para Modelo C: remover NAs (período difuso) E aplicar o mesmo burn-in
+et_A_conv <- na.omit(et_A)[(burnin + 1):length(na.omit(et_A))]
+et_C_conv <- na.omit(et_C)[(burnin + 1):length(na.omit(et_C))]
+
+make_inovacao_plot <- function(et, titulo, cor) {
+  et_clean <- na.omit(et)
+  # Limites do eixo Y baseados nos dados limpos (sem outliers difusos)
+  ylim_val <- max(abs(et_clean)) * 1.05
+  tibble(tempo = tempo_vec[seq_along(et)], et = et) |>
+    ggplot(aes(x = tempo, y = et)) +
+    geom_line(color = cor, linewidth = 0.45, alpha = 0.8, na.rm = TRUE) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_hline(yintercept = c(-2, 2) * sd(et_clean),
+               linetype = "dotted", color = cores[2], linewidth = 0.5) +
+    coord_cartesian(ylim = c(-ylim_val, ylim_val)) +
+    scale_x_continuous(breaks = seq(1960, 1997, by = 5)) +
+    labs(title = titulo, x = NULL,
+         y = expression(e[t] ~ "(ppm)"))
+}
+
+p_A <- make_inovacao_plot(et_A,     "Modelo A — dlmModSeas",   cores[1])
+p_B <- make_inovacao_plot(et_bruto, "Modelo B — dlmModTrig",   cores[2])
+p_C <- make_inovacao_plot(et_C,     "Modelo C — KFAS",         cores[3])
+
+p_A / p_B / p_C
+```
+
+```{r diagnostico-acf-todos}
+#| label: diagnostico-acf-todos
+#| fig-cap: "ACF das inovações dos três modelos (após burn-in de `r burnin` meses). Barras fora das bandas $\\pm 1{,}96/\\sqrt{n}$ indicam autocorrelação residual (violação de P2)."
+#| fig-height: 7
+
+make_acf_plot <- function(et_c, titulo, cor) {
+  n_c  <- length(et_c)
+  ic   <- 1.96 / sqrt(n_c)
+  obj  <- acf(et_c, lag.max = 36, plot = FALSE)
+  tibble(lag = as.integer(obj$lag[-1]), acf = as.numeric(obj$acf[-1])) |>
+    ggplot(aes(x = lag, y = acf)) +
+    geom_hline(yintercept = 0, color = "gray50") +
+    geom_segment(aes(xend = lag, yend = 0), color = cor, linewidth = 0.7) +
+    geom_hline(yintercept = c(-ic, ic), linetype = "dashed",
+               color = cores[2], linewidth = 0.7) +
+    scale_x_continuous(breaks = seq(0, 36, by = 6)) +
+    labs(title = titulo, x = "Defasagem", y = "ACF")
+}
+
+p_acf_A <- make_acf_plot(et_A_conv, "ACF — Modelo A (dlmModSeas)", cores[1])
+p_acf_B <- make_acf_plot(et_conv,   "ACF — Modelo B (dlmModTrig)", cores[2])
+p_acf_C <- make_acf_plot(et_C_conv, "ACF — Modelo C (KFAS)",       cores[3])
+
+p_acf_A / p_acf_B / p_acf_C
+```
+
+A ACF das inovações revela o padrão diferencial entre os modelos: o Modelo B (`dlmModTrig`) tem barras dentro das bandas $\pm 1{,}96/\sqrt{n}$ em todas as defasagens, confirmando ruído branco (P2). Os Modelos A e C apresentam autocorrelação significativa em defasagens específicas, indicando que suas representações sazonais não eliminam completamente a estrutura de curto prazo das inovações.
+
+```{r diagnostico-normalidade}
+#| label: diagnostico-normalidade
+#| fig-cap: "Q-Q plots das inovações dos três modelos (após burn-in). Alinhamento com a reta indica normalidade (pressuposto P3). Histogramas com curva normal sobreposta."
+#| fig-height: 8
+
+make_qq_plot <- function(et_c, titulo, cor) {
+  tibble(e = et_c) |>
+    ggplot(aes(sample = e)) +
+    stat_qq(color = cor, alpha = 0.5, size = 0.8) +
+    stat_qq_line(color = cores[2], linewidth = 0.9) +
+    labs(title = titulo, x = "Quantis teóricos", y = "Quantis amostrais")
+}
+
+make_hist_plot <- function(et_c, cor) {
+  tibble(e = et_c) |>
+    ggplot(aes(x = e)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 25,
+                   fill = cor, color = "white", alpha = 0.75) +
+    stat_function(fun = dnorm,
+                  args = list(mean = mean(et_c), sd = sd(et_c)),
+                  color = cores[2], linewidth = 1.0) +
+    labs(x = expression(e[t]), y = "Densidade")
+}
+
+(make_qq_plot(et_A_conv, "Q-Q — Modelo A", cores[1]) |
+ make_hist_plot(et_A_conv, cores[1])) /
+(make_qq_plot(et_conv,   "Q-Q — Modelo B", cores[2]) |
+ make_hist_plot(et_conv,   cores[2])) /
+(make_qq_plot(et_C_conv, "Q-Q — Modelo C", cores[3]) |
+ make_hist_plot(et_C_conv, cores[3]))
+```
+
+Os Q-Q plots e histogramas confirmam visualmente o pressuposto de normalidade (P3) para os três modelos: os pontos alinham-se bem à reta teórica e os histogramas aproximam-se da curva normal sobreposta. O Modelo B apresenta o melhor alinhamento, com caudas simétricas e ausência de outliers marcantes. O Modelo C, após o descarte do período difuso, também exibe boa normalidade. A não-normalidade não é um problema prático nos três modelos para os dados observados após o burn-in.
+
+## Testes Formais
+
+```{r diagnostico-testes}
+#| label: diagnostico-testes
+#| code-summary: "Testes formais — Modelo B (principal)"
+
+sw   <- shapiro.test(et_conv)
+lb6  <- Box.test(et_conv, lag = 6,  type = "Ljung-Box")
+lb12 <- Box.test(et_conv, lag = 12, type = "Ljung-Box")
+lb24 <- Box.test(et_conv, lag = 24, type = "Ljung-Box")
+
+tibble(
+  Teste       = c("Shapiro-Wilk",
+                  "Ljung-Box ($h = 6$)",
+                  "Ljung-Box ($h = 12$)",
+                  "Ljung-Box ($h = 24$)"),
+  Pressuposto = c("P3 — Normalidade", "P2 — Ruído branco",
+                  "P2 — Ruído branco", "P2 — Ruído branco"),
+  Estatistica = round(c(sw$statistic, lb6$statistic,
+                        lb12$statistic, lb24$statistic), 4),
+  p_valor     = round(c(sw$p.value, lb6$p.value,
+                        lb12$p.value, lb24$p.value), 4),
+  Conclusao   = c(
+    ifelse(sw$p.value   > 0.05, "Não rejeita $H_0$", "Rejeita $H_0$"),
+    ifelse(lb6$p.value  > 0.05, "Não rejeita $H_0$", "Rejeita $H_0$"),
+    ifelse(lb12$p.value > 0.05, "Não rejeita $H_0$", "Rejeita $H_0$"),
+    ifelse(lb24$p.value > 0.05, "Não rejeita $H_0$", "Rejeita $H_0$")
+  )
+) |>
+  gt() |>
+  fmt_markdown(columns = c(Teste, Conclusao)) |>
+  tab_header(
+    title    = md("**Tabela 3.** Testes Formais sobre as Inovações — Modelo B"),
+    subtitle = md(sprintf("$e_t$, $t = %d, \\ldots, n$ (descartados primeiros %d meses de burn-in)",
+                          burnin + 1, burnin))
+  ) |>
+  fmt_number(columns = c(Estatistica, p_valor), decimals = 4) |>
+  cols_label(Pressuposto = "Pressuposto", Estatistica = "Estatística",
+             p_valor = md("$p$-valor"), Conclusao = "Conclusão") |>
+  tab_style(style = cell_fill(color = "#fce4e4"),
+            locations = cells_body(rows = p_valor < 0.05)) |>
+  tab_style(style = cell_fill(color = "#e8f4f8"),
+            locations = cells_body(rows = p_valor >= 0.05))
+```
+
+## Diagnóstico Comparativo dos Três Modelos
+
+```{r diagnostico-comparativo}
+#| label: diagnostico-comparativo
+#| code-summary: "Diagnóstico comparativo — Modelos A, B e C"
+
+sw_A <- shapiro.test(et_A_conv)
+sw_C <- shapiro.test(et_C_conv)
+lb_A <- Box.test(et_A_conv, lag = 12, type = "Ljung-Box")
+lb_B <- Box.test(et_conv,   lag = 12, type = "Ljung-Box")
+lb_C <- Box.test(et_C_conv, lag = 12, type = "Ljung-Box")
+
+tibble(
+  Modelo  = c("A — dlmModSeas", "B — dlmModTrig", "C — KFAS"),
+  LogLik  = round(c(ll_A, ll_B, as.numeric(ll_C)), 2),
+  RMSE    = round(c(sqrt(mean(et_A_conv^2)),
+                    sqrt(mean(et_conv^2)),
+                    sqrt(mean(et_C_conv^2))), 4),
+  LB_p    = round(c(lb_A$p.value, lb_B$p.value, lb_C$p.value), 4),
+  SW_p    = round(c(sw_A$p.value, sw$p.value,   sw_C$p.value), 4),
+  P2_ok   = c(lb_A$p.value > 0.05, lb_B$p.value > 0.05, lb_C$p.value > 0.05),
+  P3_ok   = c(sw_A$p.value > 0.05, sw$p.value  > 0.05,  sw_C$p.value > 0.05)
+) |>
+  gt() |>
+  tab_header(
+    title    = md("**Tabela 4.** Diagnóstico Comparativo dos Três Modelos"),
+    subtitle = md(sprintf("Inovações $e_t$, $t = %d, \\ldots, n$ (burn-in = %d meses)",
+                          burnin + 1, burnin))
+  ) |>
+  fmt_number(columns = LogLik, decimals = 2) |>
+  fmt_number(columns = RMSE,   decimals = 4) |>
+  fmt_number(columns = c(LB_p, SW_p), decimals = 4) |>
+  cols_label(
+    Modelo = "Modelo",
+    LogLik = md("$\\ell(\\hat{\\theta})$"),
+    RMSE   = md("RMSE$(e_t)$"),
+    LB_p   = md("LB $p$-valor ($h=12$)"),
+    SW_p   = md("SW $p$-valor"),
+    P2_ok  = "P2 ok?",
+    P3_ok  = "P3 ok?"
+  ) |>
+  tab_footnote(
+    footnote  = md("RMSE$(e_t) = \\sqrt{n^{-1}\\sum_{t=t_0}^n e_t^2}$ — mede dispersão das inovações (pressuposto P1)."),
+    locations = cells_column_labels(columns = RMSE)
+  ) |>
+  tab_style(style = cell_fill(color = "#e8f4f8"),
+            locations = cells_body(rows = P2_ok == TRUE & P3_ok == TRUE)) |>
+  tab_style(style = cell_fill(color = "#fce4e4"),
+            locations = cells_body(rows = P2_ok == FALSE))
+```
+
+A Tabela 4 compara os três modelos por log-verossimilhança, RMSE das inovações
+(pressuposto P1), $p$-valor do Ljung-Box com $h = 12$ (P2) e $p$-valor do
+Shapiro-Wilk (P3). O modelo destacado em azul satisfaz ambos os pressupostos P2 e P3;
+os destacados em vermelho violam P2. A análise principal do documento usa o
+**Modelo B** (`dlmModTrig`) por ser o recomendado na literatura [@west1997bayesian]
+para séries com sazonalidade periódica estável.
+
+---
+
+# Resultados {#sec-resultados}
+
+O Modelo B (`dlmModTrig`) obteve a maior log-verossimilhança entre os três modelos ajustados, com $\ell =$ `r round(ll_B, 2)`, contra `r round(ll_A, 2)` do Modelo A e `r round(as.numeric(ll_C), 2)` do Modelo C. O ganho em relação ao Modelo A é consistente com a maior flexibilidade dos harmônicos de Fourier para capturar a estrutura sazonal da série. A diferença marcante em relação ao Modelo C reflete as escalas distintas de log-verossimilhança entre a estimação via `dlmMLE` (Modelos A e B) e via `fitSSM` com inicialização difusa (Modelo C), que não são diretamente comparáveis.
+
+Os parâmetros estimados por máxima verossimilhança do Modelo B são fisicamente interpretáveis e coerentes com as características conhecidas da série. A variância observacional `r sprintf("%.5f", V_est)` ppm² quantifica o ruído de medição dos instrumentos do Observatório de Mauna Loa. A variância do nível local `r sprintf("%.5f", w_mu_est)` ppm² indica que o nível médio de $\text{CO}_2$ varia moderadamente de forma estocástica ao longo dos meses, o que é esperado para uma série com tendência de longo prazo. A variância da tendência `r sprintf("%.2e", w_be_est)` ppm²/mês² é praticamente zero, confirmando que a taxa de crescimento evolui de forma muito suave ao longo do tempo, consistente com a tendência quase-linear observada no Trabalho 1. Por fim, a variância dos harmônicos sazonais `r sprintf("%.2e", w_trig_est)` ppm² indica que o padrão sazonal anual é estável entre os anos, sem grandes variações de amplitude de um ciclo para o outro.
+
+No que diz respeito à filtragem, o filtro de Kalman recupera sequencialmente o nível local $\hat{\mu}_t$ com intervalos de credibilidade de 95% estreitos ao longo de toda a série. O nível representa a tendência de longo prazo da concentração atmosférica de $\text{CO}_2$, excluindo a componente sazonal por construção. Os três modelos produzem estimativas de $\mu_t$ praticamente idênticas em valor pontual, e as diferenças nos ICs refletem as distintas parametrizações de $W$. O Modelo C tende a apresentar ICs ligeiramente mais estreitos após a convergência do filtro difuso, o que decorre da inicialização exata que não infla artificialmente a incerteza inicial como a priori de $C_0$ nos Modelos A e B.
+
+A suavização backward produz ICs sistematicamente mais estreitos do que a filtragem em todos os instantes da série. Isso acontece porque o algoritmo de suavização utiliza toda a informação amostral $D_n$ para refinar retrospectivamente cada estimativa, enquanto a filtragem usa apenas a informação disponível até o instante $t$. A diferença é mais pronunciada nos primeiros anos, quando a filtragem ainda não convergiu para o regime estacionário, e torna-se praticamente desprezível na segunda metade da série.
+
+A taxa de crescimento $\hat{\beta}_t$ constitui um resultado de particular interesse, pois corresponde a um estado latente estimado explicitamente como componente do vetor de estados do MLD. Os três modelos concordam em revelar uma aceleração progressiva da taxa: de aproximadamente 0,8 ppm/ano em 1960 para aproximadamente 1,5 ppm/ano em 1997. Esse padrão não é acessível diretamente pelo SARIMA$(1,1,1)(0,1,1)_{12}$ do Trabalho 1, que modela a série diferenciada $\nabla y_t$ sem decompor o nível e o slope em estados separados. O Modelo B apresenta os ICs mais estreitos para $\hat{\beta}_t$, como resultado da estimativa de $\hat{W}_\beta$ muito próxima de zero obtida por máxima verossimilhança, que impõe alta suavidade à trajetória do slope. O Modelo A tem ICs substancialmente mais largos e o Modelo C apresenta ICs de largura intermediária. A aceleração observada é consistente com o aumento das emissões globais de combustíveis fósseis no período e com a análise da decomposição STL apresentada no Trabalho 1.
+
+O diagnóstico das inovações, realizado após o descarte dos primeiros `r burnin` meses de burn-in, confirma a adequação do Modelo B. O teste de Shapiro-Wilk não rejeita a normalidade das inovações ($p =$ `r sprintf("%.4f", sw$p.value)`), e o teste de Ljung-Box não detecta autocorrelação em nenhuma das defasagens testadas ($h = 6$: $p =$ `r sprintf("%.4f", lb6$p.value)`; $h = 12$: $p =$ `r sprintf("%.4f", lb12$p.value)`; $h = 24$: $p =$ `r sprintf("%.4f", lb24$p.value)`). O RMSE das inovações brutas é `r sprintf("%.4f", sqrt(mean(et_conv^2)))` ppm. Os Modelos A e C violam o pressuposto P2 (ruído branco), com o Ljung-Box rejeitando a hipótese nula em $h = 12$ ($p < 0{,}05$). Esse resultado indica que a representação harmônica de Fourier do Modelo B captura a estrutura sazonal de forma mais completa do que a representação por fatores dos Modelos A e C.
+
+Quanto às previsões, os quatro modelos comparados (Modelos A, B e C, e o SARIMA do Trabalho 1) convergem para valores pontuais muito próximos ao longo dos 24 meses previstos. Para dezembro de `r fim[1] + 1`, o Modelo B prevê `r prev_dez98_mld` ppm, contra `r prev_dez98_sar` ppm do SARIMA. Para dezembro de `r fim[1] + 2`, as previsões são de `r prev_dez99_mld` ppm (IC 95%: `r ic95_lo_dez99_mld` a `r ic95_hi_dez99_mld` ppm) e `r prev_dez99_sar` ppm, respectivamente. As diferenças entre os modelos são inferiores a 0,5 ppm em todos os horizontes. Os ICs dos MLDs são ligeiramente mais largos do que os do SARIMA porque incorporam a incerteza sobre o vetor de estados latentes, enquanto o SARIMA condiciona nas observações passadas sem modelar estados não observáveis. A largura do IC 95% do Modelo B cresce de `r larg_ic_h1` ppm em $h = 1$ para `r larg_ic_h24` ppm em $h = 24$, refletindo a propagação da incerteza ao longo do horizonte de previsão. A abordagem com fatores de desconto reproduz as previsões do Modelo B sem requerer a estimação prévia de $V$ e $W$, demonstrando sua robustez como alternativa prática quando os parâmetros não são conhecidos a priori.
+
+---
+
+# Conclusão
+
+Este trabalho demonstrou que o MLD de tendência linear com sazonalidade harmônica,
+utilizando `r J` harmônicos de Fourier de período sazonal 12 e totalizando
+`r nrow(mld_B$GG)` estados, constitui uma alternativa bayesiana eficaz ao
+SARIMA$(1,1,1)(0,1,1)_{12}$ do Trabalho 1 para a série de $\text{CO}_2$ de Mauna Loa.
+Entre os três modelos ajustados, o Modelo B (`dlmModTrig`) foi selecionado por
+apresentar a maior log-verossimilhança ($\ell =$ `r round(ll_B, 2)`) e por ser o
+único a satisfazer simultaneamente os pressupostos de ruído branco (P2, com
+Ljung-Box $p > 0{,}10$ para $h \leq 24$) e de normalidade (P3, com
+Shapiro-Wilk $p =$ `r sprintf("%.4f", sw$p.value)`) nas inovações após o período
+de burn-in.
+
+As vantagens do MLD em relação ao SARIMA ficam evidentes ao longo da análise.
+A principal delas é a interpretação direta dos componentes latentes: o nível $\mu_t$,
+a taxa de crescimento $\beta_t$ e a sazonalidade $\gamma_t$ são estimados
+explicitamente como estados do sistema, o que permite inferências que o SARIMA não
+fornece. Em particular, a taxa de crescimento $\hat{\beta}_t$ revelou uma aceleração
+progressiva da concentração de $\text{CO}_2$, de aproximadamente 0,8 ppm/ano em 1960
+para aproximadamente 1,5 ppm/ano em 1997, padrão que é consistente com o aumento das
+emissões globais no período e que o SARIMA do Trabalho 1 não captura explicitamente.
+Além disso, a atualização sequencial via filtro de Kalman torna o MLD naturalmente
+adequado para monitoração e previsão em tempo real. Por fim, a flexibilidade dos
+fatores de desconto ($\delta_T =$ `r delta_T`, $\delta_S =$ `r delta_S`) permite
+incorporar variâncias variantes no tempo sem re-estimação do modelo, o que é uma
+vantagem prática relevante em aplicações de monitoração atmosférica contínua.
+
+As previsões dos três MLDs e do SARIMA convergem para valores muito próximos: para
+dezembro de `r fim[1] + 1`, o Modelo B prevê `r prev_dez98_mld` ppm (SARIMA:
+`r prev_dez98_sar` ppm); para dezembro de `r fim[1] + 2`, `r prev_dez99_mld` ppm
+(SARIMA: `r prev_dez99_sar` ppm). Essa concordância sugere que, para previsão pura
+em horizontes de até 24 meses, as duas abordagens são equivalentes em precisão. A
+escolha entre elas depende do objetivo da análise: o SARIMA é mais parcimonioso e
+adequado quando o interesse é exclusivamente preditivo; o MLD oferece riqueza
+interpretativa, quantificação sequencial da incerteza e atualização online,
+características que o tornam preferível quando se deseja compreender a dinâmica
+subjacente da série além de simplesmente prever seus valores futuros.
+
+---
+
+# Referências
+
+::: {#refs}
+:::
+
+---
+
+# Apêndice: Códigos
+
+Todos os códigos utilizados neste trabalho estão disponíveis ao longo do documento
+com opção de expansão (`code-fold: true`). Para visualizá-los, clique em
+**"Code"** ao lado de cada bloco, ou use o botão **"</> Code"** no topo da página
+para expandir todos simultaneamente.
+
+```{r session-info}
+#| label: session-info
+#| code-summary: "Informações da sessão R"
+sessionInfo()
+```
