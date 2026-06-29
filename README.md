@@ -26,7 +26,7 @@ Aplicação da metodologia de **Modelos Lineares Dinâmicos (MLD)** à série `c
 
 **Pergunta central:** Um MLD com tendência linear e sazonalidade captura adequadamente a dinâmica da série de CO₂ e produz previsões comparáveis às do SARIMA ajustado no Trabalho 1?
 
-A análise compara três formulações de MLD, realiza filtragem de Kalman e suavização backward, aplica fatores de desconto com $V$ desconhecido e produz previsões para 1998–1999 com comparação ao SARIMA$(1,1,1)(0,1,1)_{12}$.
+A análise compara três formulações de MLD, realiza filtragem de Kalman e suavização backward, aplica fatores de desconto com $V$ desconhecido e produz previsões para 1998–1999 com comparação ao `SARIMA(1,1,1)(0,1,1)[12]` do Trabalho 1.
 
 ---
 
@@ -37,7 +37,7 @@ A análise compara três formulações de MLD, realiza filtragem de Kalman e sua
 | **2** | Especificação do MLD: estrutura geral $\{F_t, G_t, V_t, W_t\}$; três formulações (dlmModSeas, dlmModTrig, KFAS); estimação de $V$ e $W$ por máxima verossimilhança |
 | **3** | Filtragem de Kalman e suavização backward com $V$ e $W$ conhecidos; equações completas; nível local $\hat{\mu}_t$ e taxa de crescimento $\hat{\beta}_t$ |
 | **4** | Filtragem e suavização com fatores de desconto ($\delta_T$, $\delta_S$) e $V$ desconhecido; inferência conjugada sobre $\phi = 1/V$; estimativa sequencial $S_t$ |
-| **5** | Previsão $h$ passos à frente com IC 95%; comparação dos três MLDs e do SARIMA$(1,1,1)(0,1,1)_{12}$ |
+| **5** | Previsão $h$ passos à frente com IC 95%; comparação dos três MLDs e do `SARIMA(1,1,1)(0,1,1)[12]` |
 | **6** | Diagnóstico das inovações: pressupostos P1–P3; Ljung-Box, Shapiro-Wilk, Q-Q plots; diagnóstico comparativo |
 
 ---
@@ -46,7 +46,7 @@ A análise compara três formulações de MLD, realiza filtragem de Kalman e sua
 
 ### Modelo selecionado
 
-**Modelo B — `dlmModTrig`** (sazonalidade harmônica via $J = 6$ pares de Fourier, $\dim(\theta_t) = 13$):
+**Modelo B — `dlmModTrig`** — sazonalidade harmônica via $J = 6$ pares de Fourier, $\dim(\theta_t) = 13$ estados.
 
 $$y_t = F^\prime \theta_t + v_t, \quad v_t \sim N(0, V)$$
 $$\theta_t = G\,\theta_{t-1} + \omega_t, \quad \omega_t \sim N(0, W)$$
@@ -77,8 +77,8 @@ $S_n$ (estimativa convergida de $V$) $= 0{,}14825$
 
 ### Previsão
 
-| Mês | Modelo B | SARIMA |
-|-----|---------|--------|
+| Mês | Modelo B | `SARIMA(1,1,1)(0,1,1)[12]` |
+|-----|---------|---------------------------|
 | Dezembro/1998 | 365,68 ppm | 365,60 ppm |
 | Dezembro/1999 | 367,22 ppm (IC 95%: 365,29–369,15) | 367,14 ppm |
 
@@ -92,15 +92,15 @@ A largura do IC 95% cresce de $1{,}15$ ppm ($h=1$) a $3{,}86$ ppm ($h=24$). Os q
 
 **Nível local filtrado — três modelos**
 
-![Nível local $\hat{\mu}_t$ filtrado pelos três modelos com IC 95%. Os Modelos A e B convergem rapidamente; o Modelo C omite os primeiros meses do período de inicialização difusa.](figures/plot-filtragem-1.png)
+![Nível local filtrado pelos três modelos com IC 95%. Os Modelos A e B convergem rapidamente; o Modelo C omite os primeiros meses do período de inicialização difusa.](figures/plot-filtragem-1.png)
 
 **Nível local suavizado — três modelos**
 
-![Nível local $\hat{\mu}_t^*$ suavizado com IC 95%. A suavização usa toda a informação $D_n$, produzindo ICs sistematicamente mais estreitos do que a filtragem.](figures/plot-suavizacao-1.png)
+![Nível local suavizado com IC 95%. A suavização usa toda a informação $D_n$, produzindo ICs sistematicamente mais estreitos do que a filtragem.](figures/plot-suavizacao-1.png)
 
 **Filtragem vs. suavização — trecho 1985–1992**
 
-![Comparação filtragem (laranja) vs. suavização (verde) no Modelo B para 1985–1992. Os ICs da suavização são mais estreitos; os valores pontuais são praticamente coincidentes.](figures/plot-comparacao-filt-suav-1.png)
+![Comparação filtragem vs. suavização no Modelo B para 1985–1992. Os ICs da suavização são mais estreitos; os valores pontuais são praticamente coincidentes.](figures/plot-comparacao-filt-suav-1.png)
 
 **Taxa de crescimento $\hat{\beta}_t$ (ppm/ano)**
 
@@ -136,7 +136,7 @@ A largura do IC 95% cresce de $1{,}15$ ppm ($h=1$) a $3{,}86$ ppm ($h=24$). Os q
 
 **Previsões 1998–1999**
 
-![Previsões dos três MLDs e do SARIMA$(1,1,1)(0,1,1)_{12}$ para 24 meses com IC 95%. Os quatro modelos convergem em valor pontual; a sazonalidade anual é preservada fielmente.](figures/plot-previsao-1.png)
+![Previsões dos três MLDs e do `SARIMA(1,1,1)(0,1,1)[12]` para 24 meses com IC 95%. Os quatro modelos convergem em valor pontual; a sazonalidade anual é preservada fielmente.](figures/plot-previsao-1.png)
 
 ---
 
@@ -146,7 +146,7 @@ A largura do IC 95% cresce de $1{,}15$ ppm ($h=1$) a $3{,}86$ ppm ($h=24$). Os q
 |--------|--------------------|
 | `dlm` | Especificação, estimação (`dlmMLE`), filtragem (`dlmFilter`), suavização (`dlmSmooth`) e previsão (`dlmForecast`) dos Modelos A e B |
 | `KFAS` | Modelo Estrutural Básico com estimação exata difusa (`fitSSM`, `KFS`) — Modelo C |
-| `forecast` | SARIMA$(1,1,1)(0,1,1)_{12}$ do Trabalho 1 para comparação |
+| `forecast` | `SARIMA(1,1,1)(0,1,1)[12]` do Trabalho 1 para comparação |
 | `ggplot2` | Visualizações |
 | `patchwork` | Composição de múltiplos gráficos em painéis |
 | `scales` | Formatação de eixos |
